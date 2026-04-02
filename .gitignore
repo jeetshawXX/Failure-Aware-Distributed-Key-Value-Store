@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# C++ binaries
+*.out
+*.o
+client
+server
+kv
+
+# Node (frontend)
+node_modules/
+dist/
+
+# OS
+.DS_Store
