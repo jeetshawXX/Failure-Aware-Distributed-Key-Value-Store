@@ -1,13 +1,11 @@
-from enum import Enum
-from pathlib import Path
-import subprocess
-
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-
+from pydantic import BaseModel
+import subprocess
+from pathlib import Path
 
 app = FastAPI()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 CLIENT_PATH = BASE_DIR / "core" / "client"
 
@@ -19,79 +17,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Operation(str, Enum):
-    PUT = "PUT"
-    GET = "GET"
-
+# ----------- MODELS -----------
 
 class KVRequest(BaseModel):
-    op: Operation
-    key: str = Field(min_length=1)
+    op: str
+    key: str
     value: str = ""
 
+# ----------- RUN CLIENT -----------
 
-def run_client(command: str):
-    if not CLIENT_PATH.is_file():
-        raise RuntimeError(f"Storage client binary not found at {CLIENT_PATH}")
+def run_client(cmd: str):
+    if not CLIENT_PATH.exists():
+        raise RuntimeError("client binary not found")
 
-    try:
-        process = subprocess.run(
-            [str(CLIENT_PATH)],
-            input=command + "\nEXIT\n",
-            capture_output=True,
-            cwd=CLIENT_PATH.parent,   # FIX HERE
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Storage client timed out") from exc
+    process = subprocess.run(
+        [str(CLIENT_PATH)],
+        input=cmd + "\nEXIT\n",
+        capture_output=True,
+        text=True,
+        cwd=CLIENT_PATH.parent
+    )
 
-    if process.returncode != 0:
-        stderr = process.stderr.strip() or f"Storage client exited with code {process.returncode}"
-        raise RuntimeError(stderr)
+    output = process.stdout.strip()
 
-    print("OUTPUT:", process.stdout)   # ADD THIS DEBUG
+    if not output:
+        raise RuntimeError("empty response from KV system")
 
-    return process.stdout.strip()
+    return output.split("\n")[-1]   # take last line only
 
+# ----------- API -----------
 
 @app.post("/kv")
 def kv(req: KVRequest):
-    if req.op == Operation.PUT:
+    if req.op == "PUT":
         cmd = f"PUT {req.key} {req.value}"
-    else:
+    elif req.op == "GET":
         cmd = f"GET {req.key}"
-
-
-    # simulate quorum / availability
-    if not any(nodes.values()):
-        raise HTTPException(status_code=503, detail="All nodes are down")
+    else:
+        raise HTTPException(400, "Invalid operation")
 
     try:
         result = run_client(cmd)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
-    if result == "NOT_FOUND":
-        raise HTTPException(status_code=404, detail=f"Key '{req.key}' not found")
+    if result == "NOT_LEADER":
+        raise HTTPException(503, "Request hit follower, retry")
 
-    if result == "NODE_DOWN":
-        raise HTTPException(status_code=503, detail="Storage replicas are unavailable")
+    if result == "WRITE_FAILED":
+        raise HTTPException(500, "Replication failed")
 
-    if not result:
-        raise HTTPException(status_code=502, detail="Storage client returned an empty response")
+    return {"result": result}
 
-    return {
-        "result": result
-    }
+# ----------- STATUS -----------
 
-@app.get("/health")
-def health():
-    return {"status": "running"}
-
-
-# simulate node states
 nodes = {
     "node1": True,
     "node2": True,
@@ -102,14 +81,10 @@ nodes = {
 def status():
     return nodes
 
+@app.post("/node/{node}/toggle")
+def toggle(node: str):
+    if node not in nodes:
+        raise HTTPException(404, "Node not found")
 
-@app.post("/node/{node_id}/toggle")
-def toggle_node(node_id: str):
-    if node_id not in nodes:
-        raise HTTPException(status_code=404, detail="Node not found")
-
-    nodes[node_id] = not nodes[node_id]
-    return {
-        "node": node_id,
-        "status": nodes[node_id]
-    }
+    nodes[node] = not nodes[node]
+    return nodes
